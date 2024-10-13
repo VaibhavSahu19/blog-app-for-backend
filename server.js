@@ -6,6 +6,9 @@ db.pragma("journal_mode = WAL");
 const app = express();
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
+const sanitizeHTML = require("sanitize-html");
+const marked = require('marked');
+
 
 //database setup starts here
 
@@ -16,7 +19,18 @@ const createTables = db.transaction(() => {
             username STRING NOT NULL UNIQUE,
             password STRING NOT NULL
         );
-        `).run()
+    `).run();
+    
+    db.prepare(`
+        CREATE TABLE IF NOT EXISTS posts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            createdDate text,
+            title STRING NOT NULL,
+            body TEXT NOT NULL,
+            authorid INTEGER,
+            FOREIGN KEY (authorid) REFERENCES users(id)
+        );
+    `).run();
 })
 createTables();
 //database setup ends here
@@ -27,6 +41,14 @@ app.use(express.static("public"));
 app.use(cookieParser());
 
 app.use(function (req, res, next){
+    //make our markdown function availble
+    res.locals.filterUserHTML = function(content){
+        return sanitizeHTML(marked.parse(content), {
+            allowedTags: ["p", "br", "ul", "li", "ol", "strong", "bold", "em", "i", "h1", "h2", "h3", "h4"],
+            allowedAttributes: {}
+        })
+    }
+
     res.locals.errors = [];
 
     //try to decode the incoming cookie
@@ -38,17 +60,21 @@ app.use(function (req, res, next){
     }
 
     res.locals.user = req.user;
-    console.log(req.user);
-
     next();
 })
 
 app.get('/', (req, res) => {
     if(req.user){
-        return res.render("dashboard");
+        const postsStatement = db.prepare(`SELECT * from posts where authorid = ? ORDER BY createdDate DESC`);
+        const posts = postsStatement.all(req.user.userId);
+        return res.render("dashboard", {posts});
     }
     res.render("homepage");
 });
+
+app.get('/no-post', (req, res) => {
+    res.render("no-post");
+})
 
 app.get('/login', (req, res) => {
     res.render("login");
@@ -56,6 +82,126 @@ app.get('/login', (req, res) => {
 
 app.get('/logout', (req, res) => {
     res.clearCookie("ourSimpleApp");
+    res.redirect('/');
+});
+
+function mustBeLoggedIn(req, res, next){
+    if(req.user){
+        return next();
+    }
+    return res.redirect("/");
+}
+
+app.get("/create-post", mustBeLoggedIn,  (req, res) => {
+    res.render("create-post");
+});
+
+function sharedPostValidation(req){
+    const errors = [];
+    if(typeof req.body.title !== 'string'){
+        req.body.title = "";
+    }else if(typeof req.body.body !== 'string'){
+        req.body.body = "";
+    }
+
+    //trim the html
+    req.body.title = sanitizeHTML(req.body.title.trim(), {allowedTags: [], allowedAttributes: {}});
+    req.body.body = sanitizeHTML(req.body.body.trim(), {allowedTags: [], allowedAttributes: {}});
+
+    if(!req.body.title.trim() || !req.body.body.trim()){
+        errors.push("You must provide a title/content for the post");
+    }
+
+    return errors;
+}
+
+app.get('/post/:id', (req, res) => {
+    const statement = db.prepare(`SELECT posts.*, users.username from posts INNER JOIN users ON posts.authorid = users.id where posts.id = ?`);
+    const post = statement.get(req.params.id);
+
+
+    if(!post){
+        return res.redirect('/');
+    }
+
+    const isAuthor = post.authorid === req.user.userId;
+
+    res.render('single-post', {post, isAuthor});
+});
+
+app.get('/edit-post/:id', mustBeLoggedIn, (req, res) => {
+    //try to look up to post in question
+    const statement = db.prepare(`SELECT * from posts where id = ?`);
+    const post = statement.get(req.params.id);
+
+    //if post does not exits
+    if(!post){
+        return res.redirect('/no-post');
+    }
+    //if you are not the author re-direct to homepage
+    if(post.authorid !== req.user.userId){
+        return res.redirect('/');
+    }
+
+    
+    //otherwise, render the edit post template
+    res.render('edit-post', {post})
+});
+
+app.post('/edit-post/:id', mustBeLoggedIn, (req, res) => {
+    //try to look up to post in question
+    const statement = db.prepare(`SELECT * from posts where id = ?`);
+    const post = statement.get(req.params.id);
+
+    //if post does not exits
+    if(!post){
+        return res.redirect('/no-post');
+    }
+    //if you are not the author re-direct to homepage
+    if(post.authorid !== req.user.userId){
+        return res.redirect('/');
+    };
+
+    const errors = sharedPostValidation(req);
+    if(errors.length){
+        return res.render('edit-post', {errors});
+    }
+    const updatedStatement = db.prepare(`UPDATE posts SET title = ?, body = ? where id = ?`);
+    updatedStatement.run(req.body.title, req.body.body, req.params.id);
+    res.redirect(`/post/${req.params.id}`);
+
+});
+
+
+app.post("/create-post", mustBeLoggedIn, (req, res) => {
+    const errors = sharedPostValidation(req);
+    if(errors.length){
+        res.render("create-post", {errors})
+    }
+
+    //save it into database
+    const ourStatement = db.prepare(`INSERT INTO posts (title, body, authorid, createdDate) VALUES (?, ?, ?, ?)`);
+    const result = ourStatement.run(req.body.title, req.body.body, req.user.userId, new Date().toISOString());
+    const getPostStatement = db.prepare(`SELECT * from posts where ROWID = ?`);
+    const realPost = getPostStatement.get(result.lastInsertRowid);
+    res.redirect(`/post/${realPost.id}`);
+});
+
+app.post('/delete-post/:id', mustBeLoggedIn, (req, res) => {
+    const statement = db.prepare(`SELECT * from posts where id = ?`);
+    const post = statement.get(req.params.id);
+
+    //if post does not exits
+    if(!post){
+        return res.redirect('/no-post');
+    }
+    //if you are not the author re-direct to homepage
+    if(post.authorid !== req.user.userId){
+        return res.redirect('/');
+    };
+
+    const deleteStatement = db.prepare(`DELETE from posts where id = ?`);
+    deleteStatement.run(req.params.id);
     res.redirect('/');
 });
 

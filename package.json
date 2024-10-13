@@ -18,6 +18,8 @@
     "ejs": "^3.1.10",
     "express": "^4.21.0",
     "jsonwebtoken": "^9.0.2",
-    "nodemon": "^3.1.7"
+    "marked": "^14.1.2",
+    "nodemon": "^3.1.7",
+    "sanitize-html": "^2.13.1"
   }
 }
